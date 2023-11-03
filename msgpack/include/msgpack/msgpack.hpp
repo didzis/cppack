@@ -218,7 +218,7 @@ class Packer {
 
   template <size_t I = 0, typename... Elements>
   inline typename std::enable_if<I == sizeof...(Elements), void>::type
-  pack_tuple(const std::tuple<Elements...>& t) { }
+  pack_tuple(const std::tuple<Elements...>&) { }
 
   template <size_t I = 0, typename... Elements>
   inline typename std::enable_if<I < sizeof...(Elements), void>::type
@@ -720,7 +720,7 @@ class Unpacker {
 
   template <size_t I = 0, typename... Elements>
   inline typename std::enable_if<I == sizeof...(Elements), void>::type
-  unpack_tuple(std::tuple<Elements...>& t) { }
+  unpack_tuple(std::tuple<Elements...>&) { }
 
   template <size_t I = 0, typename... Elements>
   inline typename std::enable_if<I < sizeof...(Elements), void>::type
@@ -731,7 +731,7 @@ class Unpacker {
 
   template <size_t I = 0, typename... Items>
   inline typename std::enable_if<I == sizeof...(Items), bool>::type
-  unpack_tuple_item_matching_key(const std::string& key, std::tuple<Items...>& t) { return false; }
+  unpack_tuple_item_matching_key(const std::string&, std::tuple<Items...>&) { return false; }
 
   template <size_t I = 0, typename... Items>
   inline typename std::enable_if<I < sizeof...(Items), bool>::type
@@ -815,7 +815,7 @@ class Unpacker {
     }
   }
 
-  void unpack_type(const char* v) {
+  void unpack_type(const char*) {
     std::string s;
     unpack_type(s);
   }
