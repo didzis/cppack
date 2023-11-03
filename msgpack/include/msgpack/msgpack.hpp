@@ -13,6 +13,10 @@
 #include <chrono>
 #include <cmath>
 #include <bitset>
+#include <tuple>
+#include <system_error>
+#include <unordered_map>
+#include <type_traits>
 
 namespace msgpack {
 enum class UnpackerError {
@@ -147,15 +151,58 @@ struct is_map<std::unordered_map<T, Alloc> > {
 
 class Packer {
  public:
+  template<typename... Elements>
+  class Array : public std::tuple<Elements...> {
+  public:
+    using std::tuple<Elements...>::tuple;
+  };
+  template<typename... Items>
+  class Map : public std::tuple<Items...> {
+  public:
+    using std::tuple<Items...>::tuple;
+  };
+
+  constexpr bool unpacking() const { return false; }
 
   template<class ... Types>
   void operator()(const Types &... args) {
-    (pack_type(std::forward<const Types &>(args)), ...);
+    process(args...);
   }
 
   template<class ... Types>
   void process(const Types &... args) {
     (pack_type(std::forward<const Types &>(args)), ...);
+  }
+
+  template<typename... Elements>
+  Array<Elements...> array(Elements&&... elements) {
+      return Array<Elements...>(std::forward<Elements>(elements)...);
+  }
+
+  template<typename... Items>
+  Map<Items...> map(Items&&... items) {
+      return Map<Items...>(std::forward<Items>(items)...);
+  }
+
+  template<typename Key, typename Value>
+  std::pair<Key, Value> item(Key&& first, Value&& second) {
+      return std::pair<Key, Value>(std::forward<Key>(first), std::forward<Value>(second));
+  }
+
+  template<typename... Elements>
+  void as_array(const Elements&... elements) {
+    constexpr std::size_t N = sizeof...(Elements);
+    if (!pack_array_header(N))
+      return;
+    process(elements...);
+  }
+
+  template<typename... Items>
+  void as_map(const Items&... items) {
+    constexpr std::size_t N = sizeof...(Items);
+    if (!pack_map_header(N))
+      return;
+    pack_pairs(items...);
   }
 
   const std::vector<uint8_t> &vector() const {
@@ -168,6 +215,59 @@ class Packer {
 
  private:
   std::vector<uint8_t> serialized_object;
+
+  template <size_t I = 0, typename... Elements>
+  inline typename std::enable_if<I == sizeof...(Elements), void>::type
+  pack_tuple(const std::tuple<Elements...>& t) { }
+
+  template <size_t I = 0, typename... Elements>
+  inline typename std::enable_if<I < sizeof...(Elements), void>::type
+  pack_tuple(const std::tuple<Elements...>& t) {
+      pack_type(std::get<I>(t));
+      pack_tuple<I + 1, Elements...>(t);
+  }
+
+  template<typename Key, typename Value>
+  void pack_type(const std::pair<Key, Value>& pair) {
+    pack_type(pair.first);
+    pack_type(pair.second);
+  }
+
+  template<typename Item, typename... Items>
+  void pack_pairs(const Item& item, Items&... items) {
+    pack_type(item);
+    pack_pairs(items...);
+  }
+
+  template<typename Item>
+  void pack_pairs(const Item& item) {
+    pack_type(item);
+  }
+
+  template<typename... Elements>
+  void pack_type(const std::tuple<Elements...>& value) {
+    pack_tuple(value);
+  }
+
+  template<typename... Items>
+  void pack_type(const Map<Items...>& items) {
+    constexpr std::size_t N = sizeof...(Items);
+    if (!pack_map_header(N))
+      return;
+    pack_type(static_cast<std::tuple<Items...>>(items));
+  }
+
+  template<typename... Elements>
+  void pack_type(const Array<Elements...>& value) {
+    constexpr std::size_t N = sizeof...(Elements);
+    if (!pack_array_header(N))
+      return;
+    pack_type(static_cast<std::tuple<Elements...>>(value));
+  }
+
+  void pack_type(const char* value) {
+    pack_type(std::string(value));
+  }
 
   template<class T>
   void pack_type(const T &value) {
@@ -182,50 +282,66 @@ class Packer {
     }
   }
 
+  template<> void pack_type(const std::string&);
+
   template<class T>
   void pack_type(const std::chrono::time_point<T> &value) {
     pack_type(value.time_since_epoch().count());
   }
 
-  template<class T>
-  void pack_array(const T &array) {
-    if (array.size() < 16) {
+  bool pack_array_header(size_t n) {
+    if (n < 16) {
       auto size_mask = uint8_t(0b10010000);
-      serialized_object.emplace_back(uint8_t(array.size() | size_mask));
-    } else if (array.size() < std::numeric_limits<uint16_t>::max()) {
+      serialized_object.emplace_back(uint8_t(n | size_mask));
+    } else if (n < std::numeric_limits<uint16_t>::max()) {
       serialized_object.emplace_back(array16);
       for (auto i = sizeof(uint16_t); i > 0; --i) {
-        serialized_object.emplace_back(uint8_t(array.size() >> (8U * (i - 1)) & 0xff));
+        serialized_object.emplace_back(uint8_t(n >> (8U * (i - 1)) & 0xff));
       }
-    } else if (array.size() < std::numeric_limits<uint32_t>::max()) {
+    } else if (n < std::numeric_limits<uint32_t>::max()) {
       serialized_object.emplace_back(array32);
       for (auto i = sizeof(uint32_t); i > 0; --i) {
-        serialized_object.emplace_back(uint8_t(array.size() >> (8U * (i - 1)) & 0xff));
+        serialized_object.emplace_back(uint8_t(n >> (8U * (i - 1)) & 0xff));
       }
     } else {
-      return; // Give up if string is too long
+      return false; // Give up if string is too long
     }
+    return true;
+  }
+
+  template<class T>
+  void pack_array(const T &array) {
+    if (!pack_array_header(array.size()))
+      return;
     for (const auto &elem : array) {
       pack_type(elem);
     }
   }
 
-  template<class T>
-  void pack_map(const T &map) {
-    if (map.size() < 16) {
+  bool pack_map_header(size_t n) {
+    if (n < 16) {
       auto size_mask = uint8_t(0b10000000);
-      serialized_object.emplace_back(uint8_t(map.size() | size_mask));
-    } else if (map.size() < std::numeric_limits<uint16_t>::max()) {
+      serialized_object.emplace_back(uint8_t(n | size_mask));
+    } else if (n < std::numeric_limits<uint16_t>::max()) {
       serialized_object.emplace_back(map16);
       for (auto i = sizeof(uint16_t); i > 0; --i) {
-        serialized_object.emplace_back(uint8_t(map.size() >> (8U * (i - 1)) & 0xff));
+        serialized_object.emplace_back(uint8_t(n >> (8U * (i - 1)) & 0xff));
       }
-    } else if (map.size() < std::numeric_limits<uint32_t>::max()) {
+    } else if (n < std::numeric_limits<uint32_t>::max()) {
       serialized_object.emplace_back(map32);
       for (auto i = sizeof(uint32_t); i > 0; --i) {
-        serialized_object.emplace_back(uint8_t(map.size() >> (8U * (i - 1)) & 0xff));
+        serialized_object.emplace_back(uint8_t(n >> (8U * (i - 1)) & 0xff));
       }
+    } else {
+      return false;
     }
+    return true;
+  }
+
+  template<class T>
+  void pack_map(const T &map) {
+    if (!pack_map_header(map.size()))
+      return;
     for (const auto &elem : map) {
       pack_type(std::get<0>(elem));
       pack_type(std::get<1>(elem));
@@ -504,6 +620,19 @@ void Packer::pack_type(const std::vector<uint8_t> &value) {
 
 class Unpacker {
  public:
+  template<typename... Elements>
+  class Array : public std::tuple<Elements...> {
+  public:
+    using std::tuple<Elements...>::tuple;
+  };
+  template<typename... Items>
+  class Map : public std::tuple<Items...> {
+  public:
+    using std::tuple<Items...>::tuple;
+  };
+
+  constexpr bool unpacking() const { return true; }
+
   Unpacker() : data_pointer(nullptr), data_end(nullptr) {};
 
   Unpacker(const uint8_t *data_start, std::size_t bytes)
@@ -511,12 +640,53 @@ class Unpacker {
 
   template<class ... Types>
   void operator()(Types &... args) {
-    (unpack_type(std::forward<Types &>(args)), ...);
+    process(args...);
+  }
+
+  template<class ... Types>
+  void operator()(Types &&... args) {
+    process(args...);
   }
 
   template<class ... Types>
   void process(Types &... args) {
     (unpack_type(std::forward<Types &>(args)), ...);
+  }
+
+  template<class ... Types>
+  void process(Types &&... args) {
+    (unpack_type(std::forward<Types &>(args)), ...);
+  }
+
+  template<typename... Elements>
+  Array<Elements...> array(Elements&&... elements) {
+      return Array<Elements...>(std::forward<Elements>(elements)...);
+  }
+
+  template<typename... Items>
+  Map<Items...> map(Items&&... items) {
+      return Map<Items...>(std::forward<Items>(items)...);
+  }
+
+  template<typename Key, typename Value>
+  std::pair<Key, Value> item(Key&& first, Value&& second) {
+      return std::pair<Key, Value>(std::forward<Key>(first), std::forward<Value>(second));
+  }
+
+  template<typename... Elements>
+  void as_array(Elements&&... elements) {
+    constexpr std::size_t N = sizeof...(Elements);
+    size_t n = unpack_array_header();
+    if (n != N) {
+      ec = UnpackerError::OutOfRange;
+      return;
+    }
+    process(elements...);
+  }
+
+  template<typename... Items>
+  void as_map(Items&&... items) {
+    unpack_map_items(items...);
   }
 
   void set_data(const uint8_t *pointer, std::size_t size) {
@@ -545,6 +715,119 @@ class Unpacker {
     }
   }
 
+  template <size_t I = 0, typename... Elements>
+  inline typename std::enable_if<I == sizeof...(Elements), void>::type
+  unpack_tuple(std::tuple<Elements...>& t) { }
+
+  template <size_t I = 0, typename... Elements>
+  inline typename std::enable_if<I < sizeof...(Elements), void>::type
+  unpack_tuple(std::tuple<Elements...>& t) {
+    unpack_type(std::get<I>(t));
+    unpack_tuple<I + 1, Elements...>(t);
+  }
+
+  template <size_t I = 0, typename... Items>
+  inline typename std::enable_if<I == sizeof...(Items), bool>::type
+  unpack_tuple_item_matching_key(const std::string& key, std::tuple<Items...>& t) { return false; }
+
+  template <size_t I = 0, typename... Items>
+  inline typename std::enable_if<I < sizeof...(Items), bool>::type
+  unpack_tuple_item_matching_key(const std::string& key, std::tuple<Items...>& t) {
+    if (key == std::get<I>(t).first) {
+      unpack_type(std::get<I>(t).second);
+      return true;
+    }
+    return unpack_tuple_item_matching_key<I + 1, Items...>(key, t);
+  }
+
+  template<typename... Elements>
+  void unpack_type(std::tuple<Elements...>&& value) {
+    unpack_tuple(value);
+  }
+
+  template<typename Key, typename Value>
+  void unpack_type(std::pair<Key, Value>& item) {
+    unpack_type(item.first);
+    unpack_type(item.second);
+  }
+
+  template<typename... Items>
+  void unpack_map_items(Items&&... items) {
+    constexpr std::size_t N = sizeof...(Items);
+    size_t n = unpack_map_header();
+    if (n != N) {
+      ec = UnpackerError::OutOfRange;
+      return;
+    }
+    for (size_t i = 0; i < n; ++i) {
+      // unpack key and match against item in the items tuple
+      std::string key;    // support only string keys for now
+      unpack_type(key);
+      if (!unpack_items_matching_key(key, items...)) {
+        ec = UnpackerError::OutOfRange;
+        return;
+      }
+    }
+  }
+
+  template<typename Item, typename... Items>
+  bool unpack_items_matching_key(const std::string& key, Item& item, Items&... items) {
+    if (item.first == key) {
+      unpack_type(item.second);
+      return true;
+    }
+    return unpack_items_matching_key(key, items...);
+  }
+
+  template<typename Item, typename... Items>
+  bool unpack_items_matching_key(const std::string& key, Item& item) {
+    if (item.first == key) {
+      unpack_type(item.second);
+      return true;
+    }
+    return false;
+  }
+
+  template<typename... Elements>
+  void unpack_type(const std::tuple<Elements...>& elements) {
+    unpack_tuple(elements);
+  }
+
+  template<typename... Items>
+  void unpack_type(Map<Items...>& items) {
+    constexpr std::size_t N = sizeof...(Items);
+    size_t n = unpack_map_header();
+    if (n != N) {
+      ec = UnpackerError::OutOfRange;
+      return;
+    }
+    for (size_t i = 0; i < n; ++i) {
+      // unpack key and match against item in the items tuple
+      std::string key;    // support only string keys for now
+      unpack_type(key);
+      if (!unpack_tuple_item_matching_key(key, items)) {
+        ec = UnpackerError::OutOfRange;
+        return;
+      }
+    }
+  }
+
+  void unpack_type(const char* v) {
+    std::string s;
+    unpack_type(s);
+  }
+
+  template<typename... Elements>
+  void unpack_type(Array<Elements...>& elements) {
+    constexpr std::size_t N = sizeof...(Elements);
+    size_t n = unpack_array_header();
+    if (n != N) {
+      ec = UnpackerError::OutOfRange;
+      return;
+    }
+    unpack_type(static_cast<std::tuple<Elements...>>(elements));
+  }
+
   template<class T>
   void unpack_type(T &value) {
     if constexpr(is_map<T>::value) {
@@ -563,6 +846,8 @@ class Unpacker {
     }
   }
 
+  template<> void unpack_type(std::string&);
+
   template<class Clock, class Duration>
   void unpack_type(std::chrono::time_point<Clock, Duration> &value) {
     using RepType = typename std::chrono::time_point<Clock, Duration>::rep;
@@ -573,9 +858,7 @@ class Unpacker {
     value = TimepointType(DurationType(placeholder));
   }
 
-  template<class T>
-  void unpack_array(T &array) {
-    using ValueType = typename T::value_type;
+  size_t unpack_array_header() {
     if (safe_data() == array32) {
       safe_increment();
       std::size_t array_size = 0;
@@ -583,12 +866,7 @@ class Unpacker {
         array_size += uint32_t(safe_data()) << 8 * (i - 1);
         safe_increment();
       }
-      std::vector<uint32_t> x{};
-      for (auto i = 0U; i < array_size; ++i) {
-        ValueType val{};
-        unpack_type(val);
-        array.emplace_back(val);
-      }
+      return array_size;
     } else if (safe_data() == array16) {
       safe_increment();
       std::size_t array_size = 0;
@@ -596,19 +874,22 @@ class Unpacker {
         array_size += uint16_t(safe_data()) << 8 * (i - 1);
         safe_increment();
       }
-      for (auto i = 0U; i < array_size; ++i) {
-        ValueType val{};
-        unpack_type(val);
-        array.emplace_back(val);
-      }
+      return array_size;
     } else {
       std::size_t array_size = safe_data() & 0b00001111;
       safe_increment();
-      for (auto i = 0U; i < array_size; ++i) {
-        ValueType val{};
-        unpack_type(val);
-        array.emplace_back(val);
-      }
+      return array_size;
+    }
+  }
+
+  template<class T>
+  void unpack_array(T &array) {
+    size_t array_size = unpack_array_header();
+    using ValueType = typename T::value_type;
+    for (auto i = 0U; i < array_size; ++i) {
+      ValueType val{};
+      unpack_type(val);
+      array.emplace_back(val);
     }
   }
 
@@ -620,49 +901,38 @@ class Unpacker {
     std::copy(vec.begin(), vec.end(), array.begin());
   }
 
-  template<class T>
-  void unpack_map(T &map) {
-    using KeyType = typename T::key_type;
-    using MappedType = typename T::mapped_type;
+  size_t unpack_map_header() {
+    std::size_t map_size = 0;
     if (safe_data() == map32) {
       safe_increment();
-      std::size_t map_size = 0;
       for (auto i = sizeof(uint32_t); i > 0; --i) {
         map_size += uint32_t(safe_data()) << 8 * (i - 1);
         safe_increment();
       }
-      std::vector<uint32_t> x{};
-      for (auto i = 0U; i < map_size; ++i) {
-        KeyType key{};
-        MappedType value{};
-        unpack_type(key);
-        unpack_type(value);
-        map.insert_or_assign(key, value);
-      }
     } else if (safe_data() == map16) {
       safe_increment();
-      std::size_t map_size = 0;
       for (auto i = sizeof(uint16_t); i > 0; --i) {
         map_size += uint16_t(safe_data()) << 8 * (i - 1);
         safe_increment();
       }
-      for (auto i = 0U; i < map_size; ++i) {
-        KeyType key{};
-        MappedType value{};
-        unpack_type(key);
-        unpack_type(value);
-        map.insert_or_assign(key, value);
-      }
     } else {
-      std::size_t map_size = safe_data() & 0b00001111;
+      map_size = safe_data() & 0b00001111;
       safe_increment();
-      for (auto i = 0U; i < map_size; ++i) {
-        KeyType key{};
-        MappedType value{};
-        unpack_type(key);
-        unpack_type(value);
-        map.insert_or_assign(key, value);
-      }
+    }
+    return map_size;
+  }
+
+  template<class T>
+  void unpack_map(T &map) {
+    using KeyType = typename T::key_type;
+    using MappedType = typename T::mapped_type;
+    std::size_t map_size = unpack_map_header();
+    for (auto i = 0U; i < map_size; ++i) {
+      KeyType key{};
+      MappedType value{};
+      unpack_type(key);
+      unpack_type(value);
+      map.insert_or_assign(key, value);
     }
   }
 };
