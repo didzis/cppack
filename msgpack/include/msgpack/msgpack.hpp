@@ -276,9 +276,10 @@ class Packer {
     } else if constexpr (is_container<T>::value || is_stdarray<T>::value) {
       pack_array(value);
     } else {
-      auto recursive_packer = Packer{};
-      const_cast<T &>(value).pack(recursive_packer);
-      pack_type(recursive_packer.vector());
+      // auto recursive_packer = Packer{};
+      // const_cast<T &>(value).pack(recursive_packer);
+      // pack_type(recursive_packer.vector());
+      const_cast<T &>(value).pack(*this);
     }
   }
 
@@ -837,12 +838,13 @@ class Unpacker {
     } else if constexpr (is_stdarray<T>::value) {
       unpack_stdarray(value);
     } else {
-      auto recursive_data = std::vector<uint8_t>{};
-      unpack_type(recursive_data);
-
-      auto recursive_unpacker = Unpacker{recursive_data.data(), recursive_data.size()};
-      value.pack(recursive_unpacker);
-      ec = recursive_unpacker.ec;
+      // auto recursive_data = std::vector<uint8_t>{};
+      // unpack_type(recursive_data);
+      //
+      // auto recursive_unpacker = Unpacker{recursive_data.data(), recursive_data.size()};
+      // value.pack(recursive_unpacker);
+      // ec = recursive_unpacker.ec;
+      value.pack(*this);
     }
   }
 
