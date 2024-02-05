@@ -1260,7 +1260,9 @@ template<>
 inline
 void Unpacker::unpack_type(std::vector<uint8_t> &value) {
   std::size_t bin_size = 0;
-  if (safe_data() == bin32) {
+  if (safe_data() == array32 || safe_data() == array16) {
+    unpack_array(value);
+  } else if (safe_data() == bin32) {
     safe_increment();
     for (auto i = sizeof(uint32_t); i > 0; --i) {
       bin_size += uint32_t(safe_data()) << 8 * (i - 1);
