@@ -285,7 +285,7 @@ class Packer {
     }
   }
 
-  template<> void pack_type(const std::string&);
+  void pack_type(const std::string&);
 
   template<class T>
   void pack_type(const std::chrono::time_point<T> &value) {
@@ -571,7 +571,6 @@ void Packer::pack_type(const double &value) {
   }
 }
 
-template<>
 inline
 void Packer::pack_type(const std::string &value) {
   if (value.size() < 32) {
@@ -852,7 +851,7 @@ class Unpacker {
     }
   }
 
-  template<> void unpack_type(std::string&);
+  void unpack_type(std::string&);
 
   template<class Clock, class Duration>
   void unpack_type(std::chrono::time_point<Clock, Duration> &value) {
@@ -1222,7 +1221,6 @@ void Unpacker::unpack_type(double &value) {
   }
 }
 
-template<>
 inline
 void Unpacker::unpack_type(std::string &value) {
   std::size_t str_size = 0;
